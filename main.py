@@ -21,7 +21,6 @@ from __future__ import annotations
 import logging
 import os
 from concurrent import futures
-from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import requests
@@ -29,6 +28,14 @@ import urllib3
 from dotenv import load_dotenv
 from plexapi.server import PlexServer
 from plexapi.video import Movie, Show
+from tenacity import (
+    after_log,
+    before_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from tqdm import tqdm
 
 from config import Config
@@ -103,38 +110,15 @@ class PlexSummaryUpdater:
         session.params = {"api_key": self.config.tmdb_api_key}
         return session
 
-    @lru_cache(maxsize=1024)
-    def _make_tmdb_request_cached(
-        self, endpoint: str, param_items: tuple = ()
-    ) -> Optional[TMDBData]:
-        """Makes a cached request to the TMDB API.
-
-        Internal method that handles the actual caching. Only used for
-        requests with hashable parameters.
-
-        Args:
-            endpoint: The TMDB API endpoint to request.
-            param_items: Tuple of (key, value) pairs for request parameters.
-
-        Returns:
-            The JSON response data if successful.
-
-        Raises:
-            TMDBError: If the API request fails.
-        """
-        try:
-            url = f"{self.config.tmdb_base_url}/{endpoint}"
-            params = dict(param_items) if param_items else {}
-            response = self.session.get(url, params=params, verify=self.config.verify_ssl)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            raise TMDBError(f"TMDB API request failed: {e}") from e
-
+    @retry(
+        retry=retry_if_exception_type(requests.RequestException),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(3),
+        before=before_log(logger, logging.DEBUG),
+        after=after_log(logger, logging.DEBUG),
+    )
     def make_tmdb_request(self, endpoint: str, **kwargs) -> Optional[TMDBData]:
-        """Makes a request to the TMDB API.
-
-        Public method that handles both cached and uncached requests.
+        """Makes a request to the TMDB API with exponential backoff.
 
         Args:
             endpoint: The TMDB API endpoint to request.
@@ -144,27 +128,20 @@ class PlexSummaryUpdater:
             The JSON response data if successful.
 
         Raises:
-            TMDBError: If the API request fails.
+            TMDBError: If the API request fails after all retries.
+
+        The function will retry up to 3 times with exponential backoff:
+            1st retry: ~2 seconds
+            2nd retry: ~4 seconds
+            3rd retry: ~8-10 seconds (capped at 10)
         """
-        # Extract params from kwargs
-        params = kwargs.pop("params", {})
-
-        # If we have additional kwargs, use uncached version
-        if kwargs:
-            try:
-                url = f"{self.config.tmdb_base_url}/{endpoint}"
-                response = self.session.get(
-                    url, params=params, verify=self.config.verify_ssl, **kwargs
-                )
-                response.raise_for_status()
-                return response.json()
-            except requests.RequestException as e:
-                raise TMDBError(f"TMDB API request failed: {e}") from e
-
-        # For simple params-only requests, use cached version
-        # Convert params dict items to tuple for hashing
-        param_items = tuple(sorted(params.items()))
-        return self._make_tmdb_request_cached(endpoint, param_items)
+        try:
+            url = f"{self.config.tmdb_base_url}/{endpoint}"
+            response = self.session.get(url, verify=self.config.verify_ssl, **kwargs)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            raise TMDBError(f"TMDB API request failed: {e}") from e
 
     def update_library(self) -> None:
         """Update summaries for all supported media in Plex libraries."""
