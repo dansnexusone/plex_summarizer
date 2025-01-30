@@ -178,7 +178,7 @@ class PlexSummaryUpdater:
             if not results:
                 continue
 
-            self._print_results(section.title, results)
+            self._log_results(section.title, results)
 
     def _process_section(self, section) -> List[UpdateResult]:
         """Process all items in a library section using thread pool."""
@@ -193,7 +193,8 @@ class PlexSummaryUpdater:
             with tqdm(
                 total=len(media_items),
                 desc=f"Processing {section.title}",
-                unit=section.type,
+                unit=f"{section.type}s",
+                leave=False,
             ) as pbar:
                 for future in futures.as_completed(future_to_title):
                     try:
@@ -281,15 +282,18 @@ class PlexSummaryUpdater:
         return None
 
     @staticmethod
-    def _print_results(section_title: str, results: List[UpdateResult]) -> None:
-        """Print summary of update results."""
-        print(f"\nResults for {section_title}:")
-        status_counts: Dict[str, int] = {}
-        for _, status in results:
-            status_counts[status] = status_counts.get(status, 0) + 1
+    def _log_results(section_title: str, results: List[UpdateResult]) -> None:
+        """Log summary of update results in a concise format.
 
-        for status, count in sorted(status_counts.items()):
-            print(f"{status}: {count}")
+        Args:
+            section_title: Title of the processed library section.
+            results: List of (title, status) tuples from processing.
+        """
+        total = len(results)
+        updated = sum(1 for _, status in results if status == "Updated")
+        percentage = (updated / total * 100) if total > 0 else 0
+
+        logger.info("%s Changed: %d/%d (%.1f%%)", section_title, updated, total, percentage)
 
 
 def main() -> None:
